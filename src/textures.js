@@ -324,7 +324,7 @@ export function createSurgicalEnvironment(renderer) {
 
   const centerPod = new THREE.Mesh(
     podGeo,
-    new THREE.MeshBasicMaterial({ color: new THREE.Color(3.2, 3.1, 3.0) })
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(8.5, 8.2, 7.8) })
   );
   centerPod.scale.set(1.2, 1.2, 0.28);
   rigGroup.add(centerPod);
@@ -333,7 +333,7 @@ export function createSurgicalEnvironment(renderer) {
     const angle = (i / 6) * Math.PI * 2;
     const sat = new THREE.Mesh(
       podGeo,
-      new THREE.MeshBasicMaterial({ color: new THREE.Color(2.6, 2.55, 2.5) })
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(6.4, 6.2, 6.0) })
     );
     sat.position.set(Math.cos(angle) * 1.45, Math.sin(angle) * 1.45, 0);
     sat.scale.set(0.72, 0.72, 0.22);
@@ -344,7 +344,7 @@ export function createSurgicalEnvironment(renderer) {
   // Secondary surgical satellite lamp (cool sterile cyan-white)
   const dome2 = new THREE.Mesh(
     podGeo,
-    new THREE.MeshBasicMaterial({ color: new THREE.Color(1.6, 2.0, 2.5) })
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(3.4, 4.6, 6.2) })
   );
   dome2.position.set(-5.0, 5.2, 3.8);
   dome2.scale.set(2.4, 0.45, 2.4);
@@ -353,7 +353,7 @@ export function createSurgicalEnvironment(renderer) {
   // Contralateral rim fill strip
   const rimStrip = new THREE.Mesh(
     podGeo,
-    new THREE.MeshBasicMaterial({ color: new THREE.Color(2.1, 0.95, 1.1) })
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(4.2, 1.4, 1.6) })
   );
   rimStrip.position.set(0.6, 3.2, -6.8);
   rimStrip.scale.set(4.2, 1.2, 0.4);
@@ -374,19 +374,71 @@ export function createSurgicalEnvironment(renderer) {
 }
 
 /**
- * Injects a dual-lobe biological subsurface-scattering (back-lit dermal/myocardial translucency
- * + wrapped crimson terminator + wet mucosal Fresnel rim) shader chunk into a MeshPhysicalMaterial.
+ * Injects torsional / longitudinal heartbeat kinematics plus dual-lobe myocardial
+ * subsurface scattering into a MeshPhysicalMaterial.
+ * Deformation is applied in world space from shared cardiac uniforms so chambers,
+ * fat, trabeculae, and epicardial coronaries wring together.
  */
-export function attachSubsurfaceShader(material, sssHex = 0xff2418, sssIntensity = 0.48) {
+export function attachSubsurfaceShader(material, sssHex = 0xff2418, sssIntensity = 0.48, cardiacUniforms, muscle = 1) {
   const sssColor = new THREE.Color(sssHex);
   material.userData.sssColor = sssColor;
   material.userData.sssIntensity = sssIntensity;
-  material.userData.uSystolePulse = { value: 0.0 };
+  material.userData.uMuscle = muscle;
 
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uSssColor = { value: material.userData.sssColor };
     shader.uniforms.uSssIntensity = { value: material.userData.sssIntensity };
-    shader.uniforms.uSystolePulse = material.userData.uSystolePulse;
+    shader.uniforms.uSystolePulse = cardiacUniforms.uSystolePulse;
+    shader.uniforms.uAtrial = cardiacUniforms.uAtrial;
+    shader.uniforms.uVentricular = cardiacUniforms.uVentricular;
+    shader.uniforms.uTorsion = cardiacUniforms.uTorsion;
+    shader.uniforms.uShorten = cardiacUniforms.uShorten;
+    shader.uniforms.uMuscle = { value: material.userData.uMuscle };
+
+    shader.vertexShader =
+      `
+      uniform float uAtrial;
+      uniform float uVentricular;
+      uniform float uTorsion;
+      uniform float uShorten;
+      uniform float uMuscle;
+      ` + shader.vertexShader;
+
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <beginnormal_vertex>',
+      `#include <beginnormal_vertex>
+      vec3 heartOrigin = (modelMatrix * vec4(position, 1.0)).xyz;
+      float heartAngN = uTorsion * (heartOrigin.y - 0.55);
+      float heartCN = cos(heartAngN);
+      float heartSN = sin(heartAngN);
+      vec3 heartWN = mat3(modelMatrix) * objectNormal;
+      float tnx = heartWN.x * heartCN - heartWN.z * heartSN;
+      float tnz = heartWN.x * heartSN + heartWN.z * heartCN;
+      heartWN.x = tnx;
+      heartWN.z = tnz;
+      objectNormal = inverse(mat3(modelMatrix)) * heartWN;
+      `
+    );
+
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      `#include <begin_vertex>
+      vec4 heartWorld = modelMatrix * vec4(transformed, 1.0);
+      float hy = heartWorld.y;
+      float atrialBand = smoothstep(0.25, 0.8, hy) * smoothstep(1.9, 1.2, hy);
+      float ventBand = smoothstep(0.72, 0.12, hy);
+      float radialSqueeze = uMuscle * (uVentricular * ventBand * 0.135 + uAtrial * atrialBand * 0.095);
+      float invR = 1.0 - radialSqueeze;
+      float wx = heartWorld.x * invR;
+      float wz = heartWorld.z * invR;
+      float wy = hy + uMuscle * uShorten * ventBand * 0.075 * (0.5 - hy);
+      float ang = uTorsion * (hy - 0.55);
+      float c = cos(ang);
+      float s = sin(ang);
+      heartWorld = vec4(wx * c - wz * s, wy, wx * s + wz * c, 1.0);
+      transformed = (inverse(modelMatrix) * heartWorld).xyz;
+      `
+    );
 
     shader.fragmentShader =
       `
@@ -401,12 +453,11 @@ export function attachSubsurfaceShader(material, sssHex = 0xff2418, sssIntensity
       // Dual-lobe biological subsurface scattering + wet serous rim
       vec3 viewDirSss = normalize(vViewPosition);
       vec3 normalSss = normalize(normal);
-      vec3 keyLightDir = normalize(vec3(0.52, 0.74, 0.62));
-      vec3 rimLightDir = normalize(vec3(-0.35, -0.55, -0.75));
+      vec3 keyLightDir = normalize(vec3(0.48, 0.66, 0.57));
+      vec3 rimLightDir = normalize(vec3(0.05, -0.62, -0.78));
 
       float ndotl = dot(normalSss, keyLightDir);
       float wrapDiff = max(0.0, (ndotl + 0.62) / 1.62);
-      // Sub-dermal crimson terminator band where N.L transitions from lit to shadow
       float terminatorScatter = smoothstep(-0.45, 0.15, ndotl) * (1.0 - smoothstep(0.05, 0.65, ndotl));
       float backLight = max(0.0, dot(-normalSss, keyLightDir)) + 0.65 * max(0.0, dot(-normalSss, rimLightDir));
       float rimSss = pow(1.0 - max(0.0, dot(viewDirSss, normalSss)), 2.4);

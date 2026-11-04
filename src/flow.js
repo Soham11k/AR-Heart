@@ -42,7 +42,7 @@ function createBiconcaveRBCGeometry(radius = 0.062, radialSteps = 14, latheSegme
  * 2) Oxygenated Pulmonary Return -> Systemic & Coronary Circulation (Oxyhemoglobin Crimson -> Scarlet)
  *    L/R Pulmonary Veins -> Left Atrium -> Mitral Valve -> Left Ventricle -> Aortic Valve -> Aorta & Coronary Arteries (RCA, LAD, LCx)
  */
-export function createBloodFlowSystem() {
+export function createBloodFlowSystem(clippingPlane) {
   const group = new THREE.Group();
   group.name = 'BloodFlowSystem';
 
@@ -212,7 +212,8 @@ export function createBloodFlowSystem() {
     const lineMat = new THREE.LineBasicMaterial({
       color: pw.colorEnd,
       transparent: true,
-      opacity: 0.16
+      opacity: 0.16,
+      clippingPlanes: clippingPlane ? [clippingPlane] : []
     });
     group.add(new THREE.Line(lineGeo, lineMat));
   }
@@ -227,7 +228,8 @@ export function createBloodFlowSystem() {
     clearcoat: 0.9,
     clearcoatRoughness: 0.12,
     emissive: new THREE.Color(0x220810),
-    emissiveIntensity: 0.45
+    emissiveIntensity: 0.22,
+    clippingPlanes: clippingPlane ? [clippingPlane] : []
   });
 
   const instancedMesh = new THREE.InstancedMesh(rbcGeo, instancedMat, totalCount);

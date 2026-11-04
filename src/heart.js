@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { createCardiacTextureSet, attachSubsurfaceShader, fbm3 } from './textures.js';
 
 /**
  * Complete catalog of 26 anatomical structures of the human heart.
@@ -339,23 +340,102 @@ function makeTube(points, radius, tubularSegments = 48, radialSegments = 20, clo
 }
 
 /**
- * Helper to create a lathed organic chamber shell with thickness (inner + outer walls so slicing shows real lumen).
+ * Displaces a shell along its normals with helical fiber grooves and fBm lumps.
  */
-function makeHollowChamber(scaleX, scaleY, scaleZ, wallRatio = 0.78) {
-  const geo = new THREE.SphereGeometry(1, 44, 34);
+function sculptShell(geo, {
+  sx = 1,
+  sy = 1,
+  sz = 1,
+  taper = 0.16,
+  noiseAmp = 0.05,
+  freq = 1.7,
+  grooves = 0.012,
+  seed = 0
+} = {}) {
   const pos = geo.attributes.position;
   const v = new THREE.Vector3();
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i);
-    // Slight organic tapering toward bottom
-    const taper = 1 - 0.18 * Math.max(0, -v.y);
-    v.x *= scaleX * taper;
-    v.y *= scaleY;
-    v.z *= scaleZ * taper;
+    const dir = v.clone().normalize();
+    const yN = v.y;
+    const taperK = 1 - taper * Math.max(0, -yN);
+    const basal = 1 + 0.07 * Math.max(0, yN);
+    v.x *= sx * taperK * basal;
+    v.y *= sy;
+    v.z *= sz * taperK;
+
+    const n1 = fbm3(v.x * freq + seed, v.y * freq, v.z * freq, 4);
+    const n2 = fbm3(v.x * freq * 2.3 + 4.0, v.y * freq * 2.1, v.z * freq * 2.2 + seed, 3);
+    const fiber = Math.sin(v.y * 10.5 + v.x * 3.2 + v.z * 2.1 + n1 * 2.0);
+    const disp = (n1 - 0.46) * noiseAmp + (n2 - 0.5) * noiseAmp * 0.55 + fiber * grooves;
+    v.addScaledVector(dir, disp);
     pos.setXYZ(i, v.x, v.y, v.z);
   }
   geo.computeVertexNormals();
-  return { outer: geo, wallRatio };
+  return geo;
+}
+
+function organicize(geo, amp = 0.02, freq = 3.2) {
+  geo.computeVertexNormals();
+  const pos = geo.attributes.position;
+  const normals = geo.attributes.normal;
+  const v = new THREE.Vector3();
+  const nrm = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    nrm.fromBufferAttribute(normals, i);
+    const n = fbm3(v.x * freq + 1.7, v.y * freq + 0.4, v.z * freq + 2.3, 3);
+    v.addScaledVector(nrm, (n - 0.48) * amp);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * Outer epicardial shell plus a smaller endocardial shell so a clip plane shows wall thickness.
+ */
+function makeDoubleWall(opts) {
+  const outer = sculptShell(new THREE.SphereGeometry(1, 64, 48), opts);
+  const wall = opts.wall ?? 0.82;
+  const inner = sculptShell(new THREE.SphereGeometry(1, 48, 36), {
+    ...opts,
+    sx: opts.sx * wall,
+    sy: opts.sy * wall,
+    sz: opts.sz * wall,
+    noiseAmp: (opts.noiseAmp ?? 0.05) * 1.7,
+    grooves: (opts.grooves ?? 0.012) * 2.6,
+    freq: (opts.freq ?? 1.7) * 1.35,
+    seed: (opts.seed ?? 0) + 9.2
+  });
+  return [
+    { geometry: outer, kind: 'myocardium' },
+    { geometry: inner, kind: 'endocardium' }
+  ];
+}
+
+function makeFatLobules(specs) {
+  return specs.map((s) => {
+    const g = new THREE.IcosahedronGeometry(s.r, 2);
+    const pos = g.attributes.position;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      const n = fbm3(v.x * 7 + s.x, v.y * 7 + s.y, v.z * 7 + s.z, 3);
+      const lobule = 0.82 + n * 0.38;
+      v.x *= lobule * (s.sx || 1.65);
+      v.y *= lobule * (s.sy || 0.32);
+      v.z *= lobule * (s.sz || 1.2);
+      pos.setXYZ(i, v.x, v.y, v.z);
+    }
+    g.translate(s.x, s.y, s.z);
+    g.computeVertexNormals();
+    return g;
+  });
+}
+
+function makeTrabeculae(strands) {
+  return strands.map((s) => organicize(makeTube(s.pts, s.r, 14, 6), s.amp ?? 0.018, 6.5));
 }
 
 /**
@@ -368,34 +448,183 @@ export function createHeartModel(clippingPlane) {
 
   const partMeshes = new Map(); // id -> { group, meshes, meta, basePos, explodeDir, role }
   const pickableMeshes = [];
+  const textures = createCardiacTextureSet();
+  const clipPlanes = clippingPlane ? [clippingPlane] : [];
+  const cardiacUniforms = {
+    uAtrial: { value: 0 },
+    uVentricular: { value: 0 },
+    uTorsion: { value: 0 },
+    uShorten: { value: 0 },
+    uSystolePulse: { value: 0 }
+  };
 
-  function registerPart(meta, geometriesOrMeshes, offset = [0, 0, 0], animRole = 'vessel', materialOpts = {}) {
+  function kindForRole(animRole) {
+    if (animRole === 'atrium' || animRole === 'ventricle' || animRole === 'apex' || animRole === 'septum') {
+      return 'myocardium';
+    }
+    if (animRole === 'av_valve' || animRole === 'sl_valve') return 'valve';
+    if (animRole === 'chordae') return 'cord';
+    if (animRole === 'vein') return 'vein';
+    return 'artery';
+  }
+
+  function makeTissueMaterial(kind, meta, animRole) {
+    const base = {
+      clippingPlanes: clipPlanes,
+      clipShadows: true
+    };
+    let mat;
+    let sssHex = 0xff2418;
+    let sssIntensity = 0.5;
+    let muscle = 1;
+
+    if (kind === 'myocardium') {
+      const color = new THREE.Color(0xc4474c).lerp(new THREE.Color(meta.color), 0.16);
+      mat = new THREE.MeshPhysicalMaterial({
+        ...base,
+        color,
+        map: textures.myocardiumAlbedo,
+        normalMap: textures.myocardiumNormal,
+        normalScale: new THREE.Vector2(0.55, 0.55),
+        roughnessMap: textures.myocardiumRoughness,
+        roughness: 0.9,
+        metalness: 0.02,
+        clearcoat: 0.55,
+        clearcoatRoughness: 0.24,
+        sheen: 0.48,
+        sheenColor: new THREE.Color(0xff6a58),
+        sheenRoughness: 0.55,
+        ior: 1.4,
+        envMapIntensity: 1.2,
+        side: THREE.DoubleSide
+      });
+      sssHex = 0xff2a20;
+      sssIntensity = 0.58;
+    } else if (kind === 'trabecula') {
+      mat = new THREE.MeshPhysicalMaterial({
+        ...base,
+        color: new THREE.Color(0x9a2832),
+        normalMap: textures.endocardiumNormal,
+        normalScale: new THREE.Vector2(1.1, 1.1),
+        roughness: 0.24,
+        metalness: 0.02,
+        clearcoat: 0.8,
+        clearcoatRoughness: 0.12,
+        sheen: 0.3,
+        sheenColor: new THREE.Color(0xff5a62),
+        sheenRoughness: 0.45,
+        envMapIntensity: 1.1,
+        side: THREE.DoubleSide
+      });
+      sssHex = 0xff2430;
+      sssIntensity = 0.42;
+    } else if (kind === 'endocardium') {
+      mat = new THREE.MeshPhysicalMaterial({
+        ...base,
+        color: new THREE.Color(0x8a1c28),
+        normalMap: textures.endocardiumNormal,
+        normalScale: new THREE.Vector2(1.25, 1.25),
+        roughness: 0.2,
+        metalness: 0.03,
+        clearcoat: 0.92,
+        clearcoatRoughness: 0.08,
+        sheen: 0.32,
+        sheenColor: new THREE.Color(0xff5a62),
+        sheenRoughness: 0.4,
+        envMapIntensity: 1.25,
+        side: THREE.BackSide
+      });
+      sssHex = 0xff1c24;
+      sssIntensity = 0.36;
+    } else if (kind === 'fat') {
+      mat = new THREE.MeshPhysicalMaterial({
+        ...base,
+        color: new THREE.Color(0xffe2b8),
+        map: textures.adiposeAlbedo,
+        normalMap: textures.adiposeNormal,
+        normalScale: new THREE.Vector2(0.85, 0.85),
+        roughness: 0.46,
+        metalness: 0.0,
+        clearcoat: 0.32,
+        clearcoatRoughness: 0.38,
+        sheen: 0.22,
+        sheenColor: new THREE.Color(0xffd7a4),
+        sheenRoughness: 0.7,
+        envMapIntensity: 0.75,
+        side: THREE.FrontSide
+      });
+      sssHex = 0xffb06a;
+      sssIntensity = 0.2;
+    } else if (kind === 'valve' || kind === 'cord') {
+      mat = new THREE.MeshPhysicalMaterial({
+        ...base,
+        color: kind === 'cord' ? new THREE.Color(0xf3e6c4) : new THREE.Color(0xf0d48a).lerp(new THREE.Color(meta.color), 0.22),
+        normalMap: textures.vesselNormal,
+        normalScale: new THREE.Vector2(0.4, 0.4),
+        roughness: kind === 'cord' ? 0.4 : 0.26,
+        metalness: 0.02,
+        clearcoat: 0.7,
+        clearcoatRoughness: 0.18,
+        envMapIntensity: 0.95,
+        side: THREE.DoubleSide
+      });
+      sssHex = 0xffd0a0;
+      sssIntensity = 0.12;
+      muscle = kind === 'cord' ? 1 : 0;
+    } else {
+      const color = new THREE.Color(meta.color);
+      color.lerp(kind === 'vein' ? new THREE.Color(0xb9d7f5) : new THREE.Color(0xffd0d0), 0.14);
+      mat = new THREE.MeshPhysicalMaterial({
+        ...base,
+        color,
+        normalMap: textures.vesselNormal,
+        normalScale: new THREE.Vector2(0.55, 0.75),
+        roughness: 0.3,
+        metalness: 0.04,
+        clearcoat: 0.82,
+        clearcoatRoughness: 0.12,
+        sheen: 0.2,
+        sheenColor: color.clone(),
+        sheenRoughness: 0.5,
+        envMapIntensity: 1.15,
+        side: THREE.DoubleSide
+      });
+      const venous = kind === 'vein';
+      sssHex = venous ? 0x1d4e8f : 0xff2430;
+      sssIntensity = venous ? 0.16 : 0.26;
+      muscle = animRole === 'coronary' ? 1 : 0;
+    }
+
+    attachSubsurfaceShader(mat, sssHex, sssIntensity, cardiacUniforms, muscle);
+    return mat;
+  }
+
+  function registerPart(meta, geometriesOrMeshes, offset = [0, 0, 0], animRole = 'vessel') {
     const group = new THREE.Group();
     group.name = meta.id;
     group.position.set(offset[0], offset[1], offset[2]);
 
-    const mat = new THREE.MeshPhysicalMaterial({
-      color: meta.color,
-      roughness: materialOpts.roughness ?? 0.34,
-      metalness: materialOpts.metalness ?? 0.06,
-      clearcoat: materialOpts.clearcoat ?? 0.45,
-      clearcoatRoughness: 0.25,
-      side: THREE.DoubleSide,
-      clippingPlanes: clippingPlane ? [clippingPlane] : [],
-      clipShadows: true,
-      transparent: materialOpts.transparent ?? false,
-      opacity: materialOpts.opacity ?? 1.0
-    });
-
+    const defaultKind = kindForRole(animRole);
+    const matCache = new Map();
+    const materials = [];
     const meshes = [];
-    for (const item of geometriesOrMeshes) {
-      let mesh;
-      if (item.isMesh) {
-        mesh = item;
-        mesh.material = mat;
-      } else {
-        mesh = new THREE.Mesh(item, mat);
+
+    function materialFor(kind) {
+      if (!matCache.has(kind)) {
+        const mat = makeTissueMaterial(kind, meta, animRole);
+        matCache.set(kind, mat);
+        materials.push(mat);
       }
+      return matCache.get(kind);
+    }
+
+    for (const item of geometriesOrMeshes) {
+      const geometry = item.isBufferGeometry ? item : item.geometry;
+      const kind = item.isBufferGeometry ? defaultKind : (item.kind || defaultKind);
+      if ((animRole === 'artery' || animRole === 'vein' || animRole === 'coronary') && geometry.attributes?.position) {
+        organicize(geometry, animRole === 'coronary' ? 0.008 : 0.02, animRole === 'coronary' ? 5.5 : 2.6);
+      }
+      const mesh = new THREE.Mesh(geometry, materialFor(kind));
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.userData.partId = meta.id;
@@ -404,6 +633,8 @@ export function createHeartModel(clippingPlane) {
       meshes.push(mesh);
       pickableMeshes.push(mesh);
     }
+
+    const mat = materials[0];
 
     // Compute world center & outward explode direction
     group.updateMatrixWorld(true);
@@ -422,6 +653,7 @@ export function createHeartModel(clippingPlane) {
       group,
       meshes,
       material: mat,
+      materials,
       baseColor: new THREE.Color(meta.color),
       basePos: group.position.clone(),
       center,
@@ -440,74 +672,146 @@ export function createHeartModel(clippingPlane) {
   // 1. CHAMBERS & SEPTA (7 parts)
   // ============================================================================
 
-  // Right Atrium (upper right-anterior)
-  {
-    const { outer } = makeHollowChamber(0.92, 0.85, 0.86);
-    outer.rotateZ(-0.18);
-    // Add right auricle appendage
-    const auricle = new THREE.SphereGeometry(0.42, 24, 18);
-    auricle.scale(1.2, 0.72, 0.9);
-    auricle.translate(-0.42, 0.35, 0.55);
-    registerPart(byId.right_atrium, [outer, auricle], [-1.22, 0.92, 0.22], 'atrium');
+  function withFatAndTrabeculae(shells, fatSpecs, strands, rotateZ = 0) {
+    const items = [...shells];
+    for (const geo of makeFatLobules(fatSpecs)) items.push({ geometry: geo, kind: 'fat' });
+    for (const geo of makeTrabeculae(strands)) items.push({ geometry: geo, kind: 'trabecula' });
+    if (rotateZ) {
+      for (const item of items) item.geometry.rotateZ(rotateZ);
+    }
+    return items;
   }
 
-  // Right Ventricle (anterior-right crescent chamber)
+  // Right Atrium (upper right-anterior) — thin double wall + auricle + pectinate ridges
   {
-    const { outer } = makeHollowChamber(1.06, 1.52, 0.98);
-    outer.rotateZ(-0.24);
-    const infundibulum = makeTube(
+    const shells = makeDoubleWall({
+      sx: 0.92, sy: 0.85, sz: 0.86, taper: 0.08, noiseAmp: 0.042, freq: 1.85, grooves: 0.011, wall: 0.9, seed: 1.3
+    });
+    const auricle = sculptShell(new THREE.SphereGeometry(0.26, 28, 22), {
+      sx: 1.35, sy: 0.42, sz: 0.62, taper: 0.12, noiseAmp: 0.09, freq: 3.6, grooves: 0.028, seed: 4.2
+    });
+    auricle.translate(-0.55, 0.02, 0.48);
+    const items = withFatAndTrabeculae(
+      shells,
       [
-        [-0.55, 0.25, 0.62],
-        [-0.35, 0.88, 0.72],
-        [-0.18, 1.32, 0.66]
+        { x: 0.15, y: -0.62, z: 0.28, r: 0.16, sx: 1.8, sy: 0.28, sz: 1.1 }
       ],
-      0.44,
-      24,
-      18
+      [
+        { r: 0.026, pts: [[-0.32, 0.18, 0.32], [-0.02, -0.02, 0.46], [0.22, 0.16, 0.28]] },
+        { r: 0.02, pts: [[0.12, 0.32, 0.16], [-0.16, 0.04, 0.4], [-0.26, -0.22, 0.24]] }
+      ],
+      -0.18
     );
-    registerPart(byId.right_ventricle, [outer, infundibulum], [-0.74, -0.68, 0.34], 'ventricle');
+    items.push(auricle);
+    registerPart(byId.right_atrium, items, [-0.98, 0.78, 0.1], 'atrium');
+  }
+
+  // Right Ventricle — crescent, thinner wall, infundibulum, trabeculae, sulcus fat
+  {
+    const shells = makeDoubleWall({
+      sx: 1.06, sy: 1.52, sz: 0.8, taper: 0.24, noiseAmp: 0.055, freq: 1.45, grooves: 0.016, wall: 0.84, seed: 2.2
+    });
+    const items = withFatAndTrabeculae(
+      shells,
+      [
+        { x: 0.02, y: 0.95, z: 0.86, r: 0.16, sx: 2.1, sy: 0.34, sz: 0.7 },
+        { x: -0.55, y: 0.72, z: 0.62, r: 0.12, sx: 1.5, sy: 0.32, sz: 0.75 },
+        { x: 0.48, y: 0.7, z: 0.58, r: 0.11, sx: 1.35, sy: 0.3, sz: 0.7 }
+      ],
+      [
+        { r: 0.04, pts: [[-0.15, -0.85, 0.28], [0.22, -0.25, 0.42], [0.05, 0.35, 0.22]] },
+        { r: 0.032, pts: [[0.35, -0.55, 0.12], [-0.05, -0.15, 0.38], [-0.28, 0.28, 0.18]] },
+        { r: 0.028, pts: [[-0.32, -0.35, 0.05], [-0.08, 0.15, 0.32], [0.18, 0.48, 0.08]] },
+        { r: 0.024, pts: [[0.1, -1.05, 0.18], [0.28, -0.62, 0.05], [0.02, -0.22, 0.3]] }
+      ],
+      -0.24
+    );
+    registerPart(byId.right_ventricle, items, [-0.5, -0.58, 0.22], 'ventricle');
   }
 
   // Left Atrium (upper left-posterior)
   {
-    const { outer } = makeHollowChamber(0.94, 0.82, 0.86);
-    const auricle = new THREE.SphereGeometry(0.38, 24, 18);
-    auricle.scale(1.15, 0.68, 0.85);
-    auricle.translate(0.55, 0.22, 0.52);
-    registerPart(byId.left_atrium, [outer, auricle], [1.14, 0.98, -0.26], 'atrium');
+    const shells = makeDoubleWall({
+      sx: 0.94, sy: 0.82, sz: 0.86, taper: 0.06, noiseAmp: 0.04, freq: 1.9, grooves: 0.01, wall: 0.9, seed: 3.1
+    });
+    const auricle = sculptShell(new THREE.SphereGeometry(0.24, 26, 20), {
+      sx: 1.3, sy: 0.4, sz: 0.58, taper: 0.1, noiseAmp: 0.085, freq: 3.5, grooves: 0.026, seed: 6
+    });
+    auricle.translate(0.58, 0.04, 0.42);
+    const items = withFatAndTrabeculae(
+      shells,
+      [
+        { x: 0.05, y: -0.58, z: 0.12, r: 0.15, sx: 1.7, sy: 0.28, sz: 1.05 }
+      ],
+      [
+        { r: 0.022, pts: [[0.28, 0.12, 0.22], [-0.02, -0.08, 0.4], [-0.22, 0.16, 0.18]] },
+        { r: 0.018, pts: [[-0.1, 0.28, 0.12], [0.16, 0.02, 0.36], [0.24, -0.18, 0.16]] }
+      ]
+    );
+    items.push(auricle);
+    registerPart(byId.left_atrium, items, [0.9, 0.82, -0.18], 'atrium');
   }
 
-  // Left Ventricle (thick conical chamber on left-inferior)
+  // Left Ventricle — thick conical double wall, dense trabeculae, AV-groove fat
   {
-    const { outer } = makeHollowChamber(1.16, 1.72, 1.08);
-    outer.rotateZ(0.22);
-    registerPart(byId.left_ventricle, [outer], [0.76, -0.74, 0.06], 'ventricle');
+    const items = withFatAndTrabeculae(
+      makeDoubleWall({
+        sx: 1.14, sy: 1.72, sz: 1.02, taper: 0.3, noiseAmp: 0.05, freq: 1.4, grooves: 0.015, wall: 0.68, seed: 5.4
+      }),
+      [
+        { x: 0.08, y: 1.05, z: 0.98, r: 0.15, sx: 2.2, sy: 0.32, sz: 0.62 },
+        { x: 0.62, y: 0.82, z: 0.55, r: 0.12, sx: 1.5, sy: 0.3, sz: 0.7 },
+        { x: -0.28, y: 0.92, z: 0.72, r: 0.11, sx: 1.4, sy: 0.3, sz: 0.65 }
+      ],
+      [
+        { r: 0.045, pts: [[0.15, -0.95, 0.22], [-0.2, -0.35, 0.38], [0.05, 0.25, 0.18]] },
+        { r: 0.038, pts: [[-0.28, -0.7, -0.05], [0.12, -0.2, 0.28], [0.32, 0.35, 0.02]] },
+        { r: 0.034, pts: [[0.32, -0.45, -0.18], [0.02, 0.05, 0.22], [-0.22, 0.45, -0.05]] },
+        { r: 0.03, pts: [[-0.05, -1.15, 0.12], [0.22, -0.72, -0.08], [0.08, -0.28, 0.26]] },
+        { r: 0.026, pts: [[0.4, -0.15, 0.12], [0.1, 0.35, -0.2], [-0.18, 0.62, 0.08]] }
+      ],
+      0.22
+    );
+    registerPart(byId.left_ventricle, items, [0.48, -0.66, 0.02], 'ventricle');
   }
 
   // Interventricular Septum (central muscular wall between RV and LV)
   {
-    const septumGeo = new THREE.CylinderGeometry(0.22, 0.14, 2.25, 24, 12);
+    const septumGeo = new THREE.CylinderGeometry(0.22, 0.14, 2.25, 28, 18);
     septumGeo.scale(0.55, 1.0, 1.65);
+    organicize(septumGeo, 0.055, 2.4);
     septumGeo.rotateZ(0.14);
     registerPart(byId.interventricular_septum, [septumGeo], [0.02, -0.78, 0.18], 'septum');
   }
 
   // Interatrial Septum (upper partition with fossa ovalis depression)
   {
-    const iasGeo = new THREE.CylinderGeometry(0.52, 0.52, 0.14, 28);
+    const iasGeo = new THREE.CylinderGeometry(0.52, 0.52, 0.14, 32);
     iasGeo.rotateZ(Math.PI / 2);
     iasGeo.rotateY(0.22);
+    organicize(iasGeo, 0.02, 3.5);
     const fossaRing = new THREE.TorusGeometry(0.22, 0.045, 14, 28);
     fossaRing.rotateY(Math.PI / 2);
     registerPart(byId.interatrial_septum, [iasGeo, fossaRing], [-0.04, 0.95, -0.02], 'septum');
   }
 
-  // Cardiac Apex (conical muscular inferior-left tip)
+  // Cardiac Apex (conical muscular inferior-left tip, double-walled)
   {
-    const apexGeo = new THREE.ConeGeometry(0.76, 1.05, 32);
-    apexGeo.rotateZ(Math.PI + 0.32);
-    apexGeo.scale(1.0, 1.0, 0.88);
-    registerPart(byId.cardiac_apex, [apexGeo], [0.98, -2.08, 0.24], 'apex');
+    const apexOuter = sculptShell(new THREE.ConeGeometry(0.76, 1.05, 40, 8), {
+      sx: 1, sy: 1, sz: 0.9, taper: 0, noiseAmp: 0.04, freq: 2.1, grooves: 0.012, seed: 8
+    });
+    const apexInner = sculptShell(new THREE.ConeGeometry(0.46, 0.68, 28, 6), {
+      sx: 1, sy: 1, sz: 0.9, taper: 0, noiseAmp: 0.05, freq: 2.8, grooves: 0.02, seed: 11
+    });
+    apexInner.translate(0, -0.08, 0);
+    const items = [
+      { geometry: apexOuter, kind: 'myocardium' },
+      { geometry: apexInner, kind: 'endocardium' }
+    ];
+    for (const item of items) {
+      item.geometry.rotateZ(Math.PI + 0.32);
+    }
+    registerPart(byId.cardiac_apex, items, [0.62, -1.72, 0.12], 'apex');
   }
 
   // ============================================================================
@@ -605,13 +909,13 @@ export function createHeartModel(clippingPlane) {
 
   // Papillary Muscles (conical pillars anchoring chordae in RV & LV)
   {
-    const p1 = new THREE.ConeGeometry(0.16, 0.52, 16);
+    const p1 = organicize(new THREE.ConeGeometry(0.16, 0.52, 18), 0.03, 4);
     p1.translate(-0.92, -0.72, 0.36);
-    const p2 = new THREE.ConeGeometry(0.15, 0.48, 16);
+    const p2 = organicize(new THREE.ConeGeometry(0.15, 0.48, 18), 0.028, 4.4);
     p2.translate(-0.72, -0.78, 0.18);
-    const p3 = new THREE.ConeGeometry(0.18, 0.58, 16);
+    const p3 = organicize(new THREE.ConeGeometry(0.18, 0.58, 18), 0.032, 3.8);
     p3.translate(0.92, -0.82, 0.14);
-    const p4 = new THREE.ConeGeometry(0.17, 0.54, 16);
+    const p4 = organicize(new THREE.ConeGeometry(0.17, 0.54, 18), 0.03, 4.2);
     p4.translate(0.68, -0.86, -0.14);
     registerPart(byId.papillary_muscles, [p1, p2, p3, p4], [0, 0, 0], 'ventricle');
   }
@@ -915,7 +1219,8 @@ export function createHeartModel(clippingPlane) {
     root,
     partMeshes,
     pickableMeshes,
-    partsCatalog: HEART_PARTS
+    partsCatalog: HEART_PARTS,
+    cardiacUniforms
   };
 }
 
@@ -952,6 +1257,16 @@ export function updateHeartCycle(heartModel, elapsedSeconds, bpm, beatEnabled, e
     ? Math.exp(-Math.pow((phase - 0.34) / 0.11, 2))
     : 0;
 
+  const damp = 1 - explodeFactor;
+  if (heartModel.cardiacUniforms) {
+    const uniforms = heartModel.cardiacUniforms;
+    uniforms.uAtrial.value = atrialContract * damp;
+    uniforms.uVentricular.value = ventricularContract * damp;
+    uniforms.uTorsion.value = ventricularContract * 0.085 * damp - atrialContract * 0.025 * damp;
+    uniforms.uShorten.value = ventricularContract * damp;
+    uniforms.uSystolePulse.value = ventricularContract;
+  }
+
   // Synthetic P-QRS-T ECG waveform value in [-0.4, 1.0]
   const pWave = 0.22 * Math.exp(-Math.pow((phase - 0.07) / 0.025, 2));
   const qDip = -0.18 * Math.exp(-Math.pow((phase - 0.16) / 0.01, 2));
@@ -971,17 +1286,25 @@ export function updateHeartCycle(heartModel, elapsedSeconds, bpm, beatEnabled, e
       rec.basePos.z + ex.z * explodeFactor * 0.85
     );
 
-    // 2. Role-specific physiological motion
-    if (rec.animRole === 'atrium') {
-      const s = 1 - 0.095 * atrialContract + 0.03 * ventricularContract;
-      g.scale.set(s, s, s);
-    } else if (rec.animRole === 'ventricle' || rec.animRole === 'apex') {
-      const squeezeXZ = 1 - 0.11 * ventricularContract + 0.025 * atrialContract;
-      const squeezeY = 1 - 0.065 * ventricularContract;
-      g.scale.set(squeezeXZ, squeezeY, squeezeXZ);
+    // 2. Role-specific physiological motion.
+    // Myocardium torsion, shortening, and squeeze run in the shared vertex shader
+    // so epicardial vessels stay seated on the wringing surface.
+    if (
+      rec.animRole === 'atrium' ||
+      rec.animRole === 'ventricle' ||
+      rec.animRole === 'apex' ||
+      rec.animRole === 'septum' ||
+      rec.animRole === 'chordae'
+    ) {
+      g.scale.set(1, 1, 1);
     } else if (rec.animRole === 'artery') {
-      const expand = 1 + 0.065 * arterialPulse;
-      g.scale.set(expand, 1 + 0.02 * arterialPulse, expand);
+      const expand = 1 + 0.07 * arterialPulse;
+      g.scale.set(expand, 1 + 0.025 * arterialPulse, expand);
+    } else if (rec.animRole === 'coronary') {
+      g.scale.set(1, 1, 1);
+    } else if (rec.animRole === 'vein') {
+      const expand = 1 + 0.04 * atrialContract;
+      g.scale.set(expand, 1, expand);
     } else if (rec.animRole === 'av_valve') {
       // AV valves open in diastole/atrial systole, snap closed in ventricular systole
       const openAmt = 1 - 0.22 * ventricularContract;
@@ -998,28 +1321,29 @@ export function updateHeartCycle(heartModel, elapsedSeconds, bpm, beatEnabled, e
     // 3. Visual highlighting for selected / hovered part
     const isSelected = selectedPartId === id;
     const isHovered = hoveredPartId === id;
-    const mat = rec.material;
+    const mats = rec.materials || [rec.material];
 
-    if (isSelected) {
-      const pulseGlow = 0.55 + 0.25 * Math.sin(elapsedSeconds * 6);
-      mat.emissive.copy(rec.baseColor).multiplyScalar(pulseGlow);
-      mat.opacity = 1.0;
-      mat.transparent = false;
-    } else if (isHovered) {
-      mat.emissive.copy(rec.baseColor).multiplyScalar(0.35);
-      mat.opacity = 1.0;
-      mat.transparent = false;
-    } else if (selectedPartId) {
-      // Dim unselected structures slightly so internal selected parts (valves, septa, chordae) stand out clearly
-      mat.emissive.setRGB(0, 0, 0);
-      mat.transparent = true;
-      mat.opacity = 0.42;
-    } else {
-      mat.emissive.setRGB(0, 0, 0);
-      mat.transparent = false;
-      mat.opacity = 1.0;
+    for (const mat of mats) {
+      if (isSelected) {
+        const pulseGlow = 0.55 + 0.25 * Math.sin(elapsedSeconds * 6);
+        mat.emissive.copy(rec.baseColor).multiplyScalar(pulseGlow);
+        mat.opacity = 1.0;
+        mat.transparent = false;
+      } else if (isHovered) {
+        mat.emissive.copy(rec.baseColor).multiplyScalar(0.35);
+        mat.opacity = 1.0;
+        mat.transparent = false;
+      } else if (selectedPartId) {
+        mat.emissive.setRGB(0, 0, 0);
+        mat.transparent = true;
+        mat.opacity = 0.42;
+      } else {
+        mat.emissive.setRGB(0, 0, 0);
+        mat.transparent = false;
+        mat.opacity = 1.0;
+      }
     }
   }
 
-  return { phaseLabel, ecgValue, phase };
+  return { phaseLabel, ecgValue, phase, ventricularContract, atrialContract, arterialPulse };
 }

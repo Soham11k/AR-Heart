@@ -1,8 +1,14 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { HEART_PARTS, createHeartModel, updateHeartCycle } from './heart.js';
 import { createBloodFlowSystem } from './flow.js';
 import { createGestureController } from './gestures.js';
+import { createSurgicalEnvironment } from './textures.js';
+import { createHeartSoundEngine } from './audio.js';
 
 // ============================================================================
 // 1. THREE.JS SCENE, CAMERA, RENDERER & CLIPPING PLANE
@@ -18,11 +24,15 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.localClippingEnabled = false;
+renderer.localClippingEnabled = true;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.12;
+renderer.toneMappingExposure = 1.05;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x121a2e);
+scene.environment = createSurgicalEnvironment(renderer);
+scene.environmentIntensity = 1.2;
 
 const camera = new THREE.PerspectiveCamera(
   42,
@@ -44,20 +54,20 @@ controls.maxPolarAngle = Math.PI * 0.88;
 controls.minPolarAngle = Math.PI * 0.12;
 
 // Studio / Surgical Lighting
-const ambientLight = new THREE.AmbientLight(0xdbeafe, 0.72);
+const ambientLight = new THREE.AmbientLight(0xfff4f0, 0.32);
 scene.add(ambientLight);
 
-const keyLight = new THREE.DirectionalLight(0xfff1f2, 2.2);
+const keyLight = new THREE.DirectionalLight(0xfff4ee, 2.65);
 keyLight.position.set(5.5, 7.5, 6.5);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(1024, 1024);
 scene.add(keyLight);
 
-const fillLight = new THREE.DirectionalLight(0x38bdf8, 1.15);
+const fillLight = new THREE.DirectionalLight(0xc5dff5, 0.55);
 fillLight.position.set(-6.0, 2.5, 4.0);
 scene.add(fillLight);
 
-const rimLight = new THREE.DirectionalLight(0xf43f5e, 1.35);
+const rimLight = new THREE.DirectionalLight(0xff8b9a, 0.85);
 rimLight.position.set(0.5, -5.5, -5.5);
 scene.add(rimLight);
 
@@ -69,7 +79,7 @@ floorGrid.material.opacity = 0.35;
 scene.add(floorGrid);
 
 // Cross-sectional clipping plane + visual slice indicator ring
-const clippingPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 3.0);
+const clippingPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 8.0);
 
 const sliceRingGeo = new THREE.RingGeometry(2.35, 2.42, 64);
 const sliceRingMat = new THREE.MeshBasicMaterial({
@@ -86,8 +96,23 @@ scene.add(slicePlaneHelper);
 const heartModel = createHeartModel(clippingPlane);
 scene.add(heartModel.root);
 
-const bloodFlow = createBloodFlowSystem();
+const bloodFlow = createBloodFlowSystem(clippingPlane);
 scene.add(bloodFlow.group);
+
+const composer = new EffectComposer(renderer);
+composer.setPixelRatio(renderer.getPixelRatio());
+composer.setSize(window.innerWidth, window.innerHeight);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.15,
+  0.36,
+  0.94
+);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+
+const heartSounds = createHeartSoundEngine();
 
 // ============================================================================
 // 2. STATE & UI ELEMENTS
@@ -98,6 +123,7 @@ let activeCategory = 'All';
 let searchQuery = '';
 let bpm = 72;
 let beatEnabled = true;
+let soundEnabled = true;
 let flowEnabled = true;
 let explodeTarget = 0;
 let explodeCurrent = 0;
@@ -132,6 +158,7 @@ const pulseIndicatorEl = document.getElementById('pulse-indicator');
 
 const btnToggleFlow = document.getElementById('btn-toggle-flow');
 const btnToggleBeat = document.getElementById('btn-toggle-beat');
+const btnToggleSound = document.getElementById('btn-toggle-sound');
 const btnExplode = document.getElementById('btn-explode');
 const btnEnableAr = document.getElementById('btn-enable-ar');
 const btnResetView = document.getElementById('btn-reset-view');
@@ -199,7 +226,7 @@ function updateInspector(part) {
     infoTitleEl.textContent = 'Human Heart (26-Part Model)';
     infoLatinEl.textContent = 'Cor humanum — Pulmonary & Systemic Pump';
     infoDescEl.textContent =
-      'Click any structure on the 3D heart or pick from the 26-part catalog on the left. Drag the Cross-Section Slice slider below to open the chambers and inspect the interventricular septum, valves, chordae tendineae, and papillary muscles.';
+      'Click any structure on the 3D heart or pick from the 26-part catalog on the left. Drag the Cross-Section Slice slider to open the double-walled chambers and inspect trabeculae, septa, valves, chordae tendineae, and papillary muscles.';
     infoPathwayEl.textContent = 'RA → RV → Lungs → LA → LV → Aorta';
     infoRoleEl.textContent = '~5 L/min Cardiac Output';
     return;
@@ -264,12 +291,21 @@ renderPartsList();
 // ============================================================================
 // 4. CROSS-SECTIONAL SLICE PLANE LOGIC
 // ============================================================================
+let sliceShadersReady = false;
+
 function updateSlicePlane() {
   if (slicePercent <= 0) {
-    renderer.localClippingEnabled = false;
     slicePlaneHelper.visible = false;
     sliceValueEl.textContent = 'Off';
+    clippingPlane.constant = 8;
     return;
+  }
+
+  if (!sliceShadersReady) {
+    heartModel.partMeshes.forEach((rec) => {
+      for (const mat of rec.materials) mat.needsUpdate = true;
+    });
+    sliceShadersReady = true;
   }
 
   renderer.localClippingEnabled = true;
@@ -277,7 +313,7 @@ function updateSlicePlane() {
   sliceValueEl.textContent = `${slicePercent}%`;
 
   // Map percentage [1..100] to world coordinate range [+2.5 .. -2.5]
-  const offset = 2.4 - (slicePercent / 100) * 4.8;
+  const offset = 0.72 - (slicePercent / 100) * 1.65;
 
   if (sliceAxis === 'z') {
     clippingPlane.normal.set(0, 0, -1);
@@ -330,7 +366,17 @@ btnToggleBeat.addEventListener('click', () => {
   beatEnabled = !beatEnabled;
   btnToggleBeat.classList.toggle('active', beatEnabled);
   btnToggleBeat.textContent = `Beat: ${beatEnabled ? 'ON' : 'OFF'}`;
+  heartSounds.unlock();
 });
+
+btnToggleSound.addEventListener('click', () => {
+  soundEnabled = heartSounds.setEnabled(!heartSounds.isEnabled());
+  btnToggleSound.classList.toggle('active', soundEnabled);
+  btnToggleSound.textContent = `Sounds: ${soundEnabled ? 'ON' : 'OFF'}`;
+  heartSounds.unlock();
+});
+
+window.addEventListener('pointerdown', () => heartSounds.unlock());
 
 btnExplode.addEventListener('click', () => {
   explodeTarget = explodeTarget > 0 ? 0 : 1;
@@ -550,6 +596,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
 });
 
 const clock = new THREE.Clock();
@@ -563,7 +610,7 @@ function animate() {
   explodeCurrent += (explodeTarget - explodeCurrent) * 0.1;
 
   // Update 26-part heart contraction, valve motion & highlight shaders
-  const { phaseLabel, ecgValue, phase } = updateHeartCycle(
+  const { phaseLabel, ecgValue, phase, ventricularContract } = updateHeartCycle(
     heartModel,
     elapsed,
     bpm,
@@ -573,8 +620,13 @@ function animate() {
     hoveredPartId
   );
 
-  cardiacPhaseEl.textContent = beatEnabled ? phaseLabel : 'CARDIAC ARREST / PAUSED';
+  const { activeSound } = heartSounds.update(dt, phase, bpm, beatEnabled && soundEnabled);
+  cardiacPhaseEl.textContent = beatEnabled
+    ? `${phaseLabel}${activeSound ? ` · ${activeSound}` : ''}`
+    : 'CARDIAC ARREST / PAUSED';
   drawEcgTrace(ecgValue);
+
+  bloomPass.strength = 0.14 + (beatEnabled ? ventricularContract * 0.22 : 0);
 
   // Update blood flow particles along venous & arterial pathways
   bloodFlow.update(dt, bpm, phase, flowEnabled);
@@ -584,7 +636,7 @@ function animate() {
   controls.update();
 
   updateSelectedPin();
-  renderer.render(scene, camera);
+  composer.render();
 }
 
 animate();
