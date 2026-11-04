@@ -1,0 +1,214 @@
+/* Canvas & App Viewport Shell */
+#canvas-container {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+}
+
+canvas#heart-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+
+canvas#heart-canvas:active {
+  cursor: grabbing;
+}
+
+/* Top Command Bar */
+.topbar {
+  position: fixed;
+  top: 10px;
+  left: 12px;
+  right: 12px;
+  min-height: var(--topbar-h);
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel);
+}
+
+/* Left Rail: Anatomical Catalog */
+.left-panel {
+  position: fixed;
+  top: 68px;
+  left: 12px;
+  bottom: 72px;
+  width: var(--left-rail-w);
+  z-index: 20;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: var(--shadow-panel);
+  transition: transform 0.2s ease, opacity 0.18s ease;
+}
+
+body[data-left-collapsed="true"] .left-panel {
+  transform: translateX(calc(-100% - 20px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Right Rail: Inspector, Cross-Section Cuts & Hand AR */
+.right-panel {
+  position: fixed;
+  top: 68px;
+  right: 12px;
+  bottom: 72px;
+  width: var(--right-rail-w);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  padding-right: 2px;
+  transition: transform 0.2s ease, opacity 0.18s ease;
+}
+
+.right-panel::-webkit-scrollbar {
+  width: 5px;
+}
+
+.right-panel::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 2px;
+}
+
+body[data-right-collapsed="true"] .right-panel {
+  transform: translateX(calc(100% + 20px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Bottom Dock: Slice & Rate Controls */
+.bottom-dock {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 10px;
+  min-height: var(--dock-h);
+  z-index: 22;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 6px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  box-shadow: var(--shadow-panel);
+}
+
+/* Mobile Bottom Sheet Navigation (hidden on desktop) */
+.mobile-nav {
+  display: none;
+}
+
+/* Tablet Breakpoint (768px - 1279px) */
+@media (max-width: 1279px) {
+  :root {
+    --left-rail-w: 272px;
+    --right-rail-w: 312px;
+  }
+
+  .flow-legend {
+    display: none;
+  }
+}
+
+@media (max-width: 1024px) {
+  .telemetry-strip {
+    display: none;
+  }
+}
+
+/* Phone / Compact Touch Breakpoint (<= 768px) */
+@media (max-width: 768px) {
+  .topbar {
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    padding: 6px 10px;
+    min-height: 44px;
+  }
+
+  .rail-toggle-btn,
+  .desktop-only-btn {
+    display: none !important;
+  }
+
+  .bottom-dock {
+    display: none !important;
+  }
+
+  .left-panel,
+  .right-panel {
+    top: auto;
+    left: 8px;
+    right: 8px;
+    bottom: calc(62px + var(--safe-bottom));
+    width: auto;
+    max-height: 58vh;
+    z-index: 28;
+    transform: translateY(calc(100% + 80px));
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  body[data-mobile-sheet="catalog"] .left-panel {
+    transform: translateY(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  body[data-mobile-sheet="inspector"] .right-panel,
+  body[data-mobile-sheet="slice"] .right-panel,
+  body[data-mobile-sheet="ar"] .right-panel {
+    transform: translateY(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  body[data-mobile-sheet="inspector"] #slice-studio-card,
+  body[data-mobile-sheet="inspector"] #gesture-card {
+    display: none;
+  }
+
+  body[data-mobile-sheet="slice"] #inspector-card,
+  body[data-mobile-sheet="slice"] #gesture-card {
+    display: none;
+  }
+
+  body[data-mobile-sheet="ar"] #inspector-card,
+  body[data-mobile-sheet="ar"] #slice-studio-card {
+    display: none;
+  }
+
+  .mobile-nav {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: calc(8px + var(--safe-bottom));
+    height: 48px;
+    z-index: 30;
+    background: var(--bg-panel-strong);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 2px;
+    padding: 2px;
+    box-shadow: var(--shadow-panel);
+  }
+}

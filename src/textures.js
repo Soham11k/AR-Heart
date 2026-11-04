@@ -137,6 +137,19 @@ function heightFieldToNormalTexture(heightField, size, strength = 3.2) {
  * and fibro-elastic arterial/valvular PBR textures.
  */
 export function createCardiacTextureSet() {
+  if (typeof document === 'undefined') {
+    const dummy = new THREE.DataTexture(new Uint8Array([200, 120, 120, 255]), 1, 1);
+    dummy.needsUpdate = true;
+    return {
+      myocardiumAlbedo: dummy,
+      myocardiumNormal: dummy,
+      myocardiumRoughness: dummy,
+      endocardiumNormal: dummy,
+      adiposeAlbedo: dummy,
+      adiposeNormal: dummy,
+      vesselNormal: dummy
+    };
+  }
   const size = 512;
 
   // 1. MYOCARDIUM STRIATED FIBER HEIGHTFIELD + ALBEDO + WETNESS ROUGHNESS
@@ -375,14 +388,21 @@ export function createSurgicalEnvironment(renderer) {
 
 /**
  * Injects torsional / longitudinal heartbeat kinematics plus dual-lobe myocardial
- * subsurface scattering into a MeshPhysicalMaterial.
- * Deformation is applied in world space from shared cardiac uniforms so chambers,
- * fat, trabeculae, and epicardial coronaries wring together.
+ * subsurface scattering and endocardial lumen shading into a MeshPhysicalMaterial.
+ * Deformation is driven from dynamic model bounds (`uHeartMin`, `uHeartMax`, `uHeartCenter`)
+ * so both the HuBMAP GLB anatomy and procedural fallback wring cohesively.
  */
-export function attachSubsurfaceShader(material, sssHex = 0xff2418, sssIntensity = 0.48, cardiacUniforms, muscle = 1) {
+export function attachSubsurfaceShader(
+  material,
+  sssHex = 0xff2418,
+  sssIntensity = 0.48,
+  cardiacUniforms,
+  muscle = 1,
+  enableSss = true
+) {
   const sssColor = new THREE.Color(sssHex);
   material.userData.sssColor = sssColor;
-  material.userData.sssIntensity = sssIntensity;
+  material.userData.sssIntensity = enableSss ? sssIntensity : 0.0;
   material.userData.uMuscle = muscle;
 
   material.onBeforeCompile = (shader) => {
@@ -393,22 +413,35 @@ export function attachSubsurfaceShader(material, sssHex = 0xff2418, sssIntensity
     shader.uniforms.uVentricular = cardiacUniforms.uVentricular;
     shader.uniforms.uTorsion = cardiacUniforms.uTorsion;
     shader.uniforms.uShorten = cardiacUniforms.uShorten;
+    shader.uniforms.uHeartMin = cardiacUniforms.uHeartMin;
+    shader.uniforms.uHeartMax = cardiacUniforms.uHeartMax;
+    shader.uniforms.uHeartCenter = cardiacUniforms.uHeartCenter;
     shader.uniforms.uMuscle = { value: material.userData.uMuscle };
 
     shader.vertexShader =
       `
+      attribute float _ENDOCARDIUM;
+      varying float vEndocardium;
+      varying vec3 vObjPos;
       uniform float uAtrial;
       uniform float uVentricular;
       uniform float uTorsion;
       uniform float uShorten;
+      uniform vec3 uHeartMin;
+      uniform vec3 uHeartMax;
+      uniform vec3 uHeartCenter;
       uniform float uMuscle;
       ` + shader.vertexShader;
 
     shader.vertexShader = shader.vertexShader.replace(
       '#include <beginnormal_vertex>',
       `#include <beginnormal_vertex>
+      vEndocardium = clamp(_ENDOCARDIUM, 0.0, 1.0);
+      vObjPos = position;
       vec3 heartOrigin = (modelMatrix * vec4(position, 1.0)).xyz;
-      float heartAngN = uTorsion * (heartOrigin.y - 0.55);
+      float hSpanN = max(0.5, uHeartMax.y - uHeartMin.y);
+      float hyNormN = (heartOrigin.y - uHeartCenter.y) / (hSpanN * 0.5);
+      float heartAngN = uTorsion * (hyNormN - 0.12);
       float heartCN = cos(heartAngN);
       float heartSN = sin(heartAngN);
       vec3 heartWN = mat3(modelMatrix) * objectNormal;
@@ -424,28 +457,61 @@ export function attachSubsurfaceShader(material, sssHex = 0xff2418, sssIntensity
       '#include <begin_vertex>',
       `#include <begin_vertex>
       vec4 heartWorld = modelMatrix * vec4(transformed, 1.0);
-      float hy = heartWorld.y;
-      float atrialBand = smoothstep(0.25, 0.8, hy) * smoothstep(1.9, 1.2, hy);
-      float ventBand = smoothstep(0.72, 0.12, hy);
+      float hSpan = max(0.5, uHeartMax.y - uHeartMin.y);
+      float hyNorm = (heartWorld.y - uHeartCenter.y) / (hSpan * 0.5);
+      float atrialBand = smoothstep(-0.08, 0.28, hyNorm) * smoothstep(0.95, 0.52, hyNorm);
+      float ventBand = smoothstep(0.24, -0.18, hyNorm);
       float radialSqueeze = uMuscle * (uVentricular * ventBand * 0.135 + uAtrial * atrialBand * 0.095);
       float invR = 1.0 - radialSqueeze;
-      float wx = heartWorld.x * invR;
-      float wz = heartWorld.z * invR;
-      float wy = hy + uMuscle * uShorten * ventBand * 0.075 * (0.5 - hy);
-      float ang = uTorsion * (hy - 0.55);
+      float wx = uHeartCenter.x + (heartWorld.x - uHeartCenter.x) * invR;
+      float wz = uHeartCenter.z + (heartWorld.z - uHeartCenter.z) * invR;
+      float pivotY = uHeartCenter.y + 0.12 * hSpan;
+      float wy = heartWorld.y + uMuscle * uShorten * ventBand * 0.075 * (pivotY - heartWorld.y);
+      float ang = uTorsion * (hyNorm - 0.12);
       float c = cos(ang);
       float s = sin(ang);
-      heartWorld = vec4(wx * c - wz * s, wy, wx * s + wz * c, 1.0);
+      float dx = wx - uHeartCenter.x;
+      float dz = wz - uHeartCenter.z;
+      heartWorld = vec4(uHeartCenter.x + dx * c - dz * s, wy, uHeartCenter.z + dx * s + dz * c, 1.0);
       transformed = (inverse(modelMatrix) * heartWorld).xyz;
       `
     );
 
     shader.fragmentShader =
       `
+      varying float vEndocardium;
+      varying vec3 vObjPos;
       uniform vec3 uSssColor;
       uniform float uSssIntensity;
       uniform float uSystolePulse;
       ` + shader.fragmentShader;
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <color_fragment>',
+      `#include <color_fragment>
+      // Seamless 3D helical muscle fiber micro-striation (free of UV wrap seams)
+      float fiberWave = sin(vObjPos.y * 26.0 + vObjPos.x * 16.0 + vObjPos.z * 14.0) * 0.5 + 0.5;
+      float bundleWave = sin(vObjPos.y * 9.0 - vObjPos.x * 11.0 + vObjPos.z * 8.0) * 0.5 + 0.5;
+      diffuseColor.rgb *= (0.92 + 0.08 * fiberWave + 0.05 * bundleWave);
+
+      // Warm salmon-ivory endocardial cavity lining on inward-facing chamber lumen walls
+      if (vEndocardium > 0.01 || !gl_FrontFacing) {
+        float endoWeight = max(vEndocardium, !gl_FrontFacing ? 0.78 : 0.0);
+        vec3 endoTint = vec3(0.87, 0.58, 0.55) * (0.90 + 0.10 * bundleWave);
+        diffuseColor.rgb = mix(diffuseColor.rgb, endoTint, endoWeight * 0.76);
+      }
+
+      #if NUM_CLIPPING_PLANES > 0
+      // Crisp pale ivory-cream endocardial/epicardial lamina rim along the cross-section cut edge
+      float clipEdgeDist = abs(dot(vClipPosition, clippingPlanes[0].xyz) - clippingPlanes[0].w);
+      float cutRim = 1.0 - smoothstep(0.004, 0.034, clipEdgeDist);
+      if (cutRim > 0.01) {
+        vec3 ivoryLamina = vec3(0.96, 0.91, 0.83);
+        diffuseColor.rgb = mix(diffuseColor.rgb, ivoryLamina, cutRim * 0.85);
+      }
+      #endif
+      `
+    );
 
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <opaque_fragment>',

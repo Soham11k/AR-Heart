@@ -4,10 +4,10 @@ import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
  * Webcam hand gesture controller powered by MediaPipe HandLandmarker.
  *
  * Supported gestures:
- * - OPEN HAND DRAG: Orbit the 3D heart (horizontal & vertical hand movement)
- * - PINCH + DRAG UP/DOWN: Zoom camera in and out
- * - PINCH ON A PART: Select the anatomical structure under the hand reticle
- * - CLOSED FIST: Reset camera, slice plane, and part selection
+ * - OPEN HAND DRAG: Orbit the 3D heart (horizontal & vertical palm movement)
+ * - PINCH + DRAG UP/DOWN: Zoom camera in and out smoothly
+ * - PINCH TAP ON A PART: Select the anatomical structure under the hand reticle
+ * - CLOSED FIST (brief hold): Reset camera, slice plane, and part selection once per closure
  */
 export function createGestureController(callbacks) {
   const {
@@ -21,7 +21,8 @@ export function createGestureController(callbacks) {
     onZoomDelta,
     onHoverScreenPoint,
     onPinchSelectAtScreenPoint,
-    onFistReset
+    onFistReset,
+    onErrorState
   } = callbacks;
 
   let handLandmarker = null;
@@ -39,9 +40,12 @@ export function createGestureController(callbacks) {
   let wasPinching = false;
   let pinchStartTime = 0;
   let pinchMovedDistance = 0;
-  let lastFistTime = 0;
+  let pinchSelectedDuringHold = false;
 
-  const ctx = overlayCanvas.getContext('2d');
+  let fistStartTime = 0;
+  let fistTriggeredInClosure = false;
+
+  const ctx = overlayCanvas ? overlayCanvas.getContext('2d') : null;
 
   function setStatus(text, isLive = false) {
     if (!statusEl) return;
@@ -57,15 +61,10 @@ export function createGestureController(callbacks) {
   }
 
   function dist2D(a, b) {
-    const dx = a.x - b.x;
-    const dy = a.y - b.y;
-    return Math.hypot(dx, dy);
+    return Math.hypot(a.x - b.x, a.y - b.y);
   }
 
   function detectHandPose(landmarks) {
-    // Key landmarks:
-    // 0: wrist, 4: thumb_tip, 8: index_tip, 12: middle_tip, 16: ring_tip, 20: pinky_tip
-    // MCP joints: 5 (index), 9 (middle), 13 (ring), 17 (pinky)
     const wrist = landmarks[0];
     const thumbTip = landmarks[4];
     const indexTip = landmarks[8];
@@ -78,14 +77,10 @@ export function createGestureController(callbacks) {
     const ringMcp = landmarks[13];
     const pinkyMcp = landmarks[17];
 
-    // Normalize by palm size (wrist to middle MCP)
     const palmScale = Math.max(0.08, dist2D(wrist, middleMcp));
-
-    // Pinch distance between thumb tip and index tip
     const pinchRatio = dist2D(thumbTip, indexTip) / palmScale;
     const isPinch = pinchRatio < 0.42;
 
-    // Check curled fingers for fist detection
     const indexCurled = dist2D(indexTip, wrist) < dist2D(indexMcp, wrist) * 1.18;
     const middleCurled = dist2D(middleTip, wrist) < dist2D(middleMcp, wrist) * 1.18;
     const ringCurled = dist2D(ringTip, wrist) < dist2D(ringMcp, wrist) * 1.18;
@@ -93,11 +88,9 @@ export function createGestureController(callbacks) {
 
     const isFist = !isPinch && indexCurled && middleCurled && ringCurled && pinkyCurled;
 
-    // Midpoint between thumb tip and index tip for reticle
-    const cursorNormX = 1 - (thumbTip.x + indexTip.x) * 0.5; // mirrored
+    const cursorNormX = 1 - (thumbTip.x + indexTip.x) * 0.5;
     const cursorNormY = (thumbTip.y + indexTip.y) * 0.5;
 
-    // Palm center (average of wrist and middle MCP, mirrored X)
     const palmNormX = 1 - (wrist.x + middleMcp.x) * 0.5;
     const palmNormY = (wrist.y + middleMcp.y) * 0.5;
 
@@ -112,6 +105,7 @@ export function createGestureController(callbacks) {
   }
 
   function drawHandSkeleton(landmarks, isPinch, isFist) {
+    if (!ctx || !overlayCanvas) return;
     const w = overlayCanvas.width;
     const h = overlayCanvas.height;
     ctx.clearRect(0, 0, w, h);
@@ -158,18 +152,18 @@ export function createGestureController(callbacks) {
         const pose = detectHandPose(lm);
         drawHandSkeleton(lm, pose.isPinch, pose.isFist);
 
-        // Update screen-space reticle
         const targetX = pose.cursorNormX * window.innerWidth;
         const targetY = pose.cursorNormY * window.innerHeight;
         smoothX += (targetX - smoothX) * 0.35;
         smoothY += (targetY - smoothY) * 0.35;
 
-        reticleEl.style.display = 'block';
-        reticleEl.style.left = `${smoothX}px`;
-        reticleEl.style.top = `${smoothY}px`;
-        reticleEl.classList.toggle('pinching', pose.isPinch);
+        if (reticleEl) {
+          reticleEl.style.display = 'block';
+          reticleEl.style.left = `${smoothX}px`;
+          reticleEl.style.top = `${smoothY}px`;
+          reticleEl.classList.toggle('pinching', pose.isPinch);
+        }
 
-        // Hover raycast under hand reticle
         if (onHoverScreenPoint) {
           onHoverScreenPoint(smoothX, smoothY);
         }
@@ -178,70 +172,91 @@ export function createGestureController(callbacks) {
 
         if (pose.isFist) {
           highlightLegend('reset');
-          setStatus('Fist: Resetting View', true);
-          if (now - lastFistTime > 900) {
-            lastFistTime = now;
+          if (fistStartTime === 0) {
+            fistStartTime = now;
+          }
+          const heldMs = now - fistStartTime;
+          if (heldMs >= 260 && !fistTriggeredInClosure) {
+            fistTriggeredInClosure = true;
+            setStatus('Fist Hold: View Reset', true);
             if (onFistReset) onFistReset();
+          } else if (!fistTriggeredInClosure) {
+            setStatus('Hold Fist to Reset...', true);
           }
           prevPalmX = null;
           prevPalmY = null;
           prevPinchY = null;
           wasPinching = false;
-        } else if (pose.isPinch) {
-          if (!wasPinching) {
-            wasPinching = true;
-            pinchStartTime = now;
-            pinchMovedDistance = 0;
-            prevPinchY = pose.cursorNormY;
-            // Immediately select part if reticle is over a heart structure
-            const didSelect = onPinchSelectAtScreenPoint
-              ? onPinchSelectAtScreenPoint(smoothX, smoothY)
-              : false;
-            if (didSelect) {
-              highlightLegend('select');
-              setStatus('Pinch: Selected Part', true);
-            } else {
-              highlightLegend('zoom');
-              setStatus('Pinch ↕: Zooming', true);
-            }
-          } else if (prevPinchY !== null) {
-            const dy = pose.cursorNormY - prevPinchY;
-            pinchMovedDistance += Math.abs(dy);
-            if (Math.abs(dy) > 0.0025 && onZoomDelta) {
-              highlightLegend('zoom');
-              setStatus('Pinch ↕: Zooming', true);
-              onZoomDelta(dy * 12);
-            }
-            prevPinchY = pose.cursorNormY;
-          }
-          prevPalmX = null;
-          prevPalmY = null;
         } else {
-          // Open hand: orbit camera by dragging palm
-          wasPinching = false;
-          prevPinchY = null;
-          highlightLegend('orbit');
-          setStatus('Open Hand: Orbiting', true);
+          fistStartTime = 0;
+          fistTriggeredInClosure = false;
 
-          if (prevPalmX !== null && prevPalmY !== null) {
-            const dx = pose.palmNormX - prevPalmX;
-            const dy = pose.palmNormY - prevPalmY;
-            if (Math.hypot(dx, dy) > 0.002 && onOrbitDelta) {
-              onOrbitDelta(-dx * 4.2, -dy * 2.8);
+          if (pose.isPinch) {
+            if (!wasPinching) {
+              wasPinching = true;
+              pinchStartTime = now;
+              pinchMovedDistance = 0;
+              pinchSelectedDuringHold = false;
+              prevPinchY = pose.cursorNormY;
+              setStatus('Pinch: Tap to Select / Drag ↕ to Zoom', true);
+            } else if (prevPinchY !== null) {
+              const dy = pose.cursorNormY - prevPinchY;
+              pinchMovedDistance += Math.abs(dy);
+
+              if (pinchMovedDistance > 0.018) {
+                highlightLegend('zoom');
+                setStatus('Pinch ↕: Zooming', true);
+                if (Math.abs(dy) > 0.002 && onZoomDelta) {
+                  onZoomDelta(dy * 12);
+                }
+              } else if (
+                !pinchSelectedDuringHold &&
+                now - pinchStartTime > 95 &&
+                pinchMovedDistance < 0.012
+              ) {
+                pinchSelectedDuringHold = true;
+                const didSelect = onPinchSelectAtScreenPoint
+                  ? onPinchSelectAtScreenPoint(smoothX, smoothY)
+                  : false;
+                if (didSelect) {
+                  highlightLegend('select');
+                  setStatus('Pinch: Selected Structure', true);
+                }
+              }
+              prevPinchY = pose.cursorNormY;
             }
+            prevPalmX = null;
+            prevPalmY = null;
+          } else {
+            wasPinching = false;
+            prevPinchY = null;
+            highlightLegend('orbit');
+            setStatus('Open Hand: Orbiting', true);
+
+            if (prevPalmX !== null && prevPalmY !== null) {
+              const dx = pose.palmNormX - prevPalmX;
+              const dy = pose.palmNormY - prevPalmY;
+              if (Math.hypot(dx, dy) > 0.002 && onOrbitDelta) {
+                onOrbitDelta(-dx * 4.2, -dy * 2.8);
+              }
+            }
+            prevPalmX = pose.palmNormX;
+            prevPalmY = pose.palmNormY;
           }
-          prevPalmX = pose.palmNormX;
-          prevPalmY = pose.palmNormY;
         }
       } else {
-        ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-        reticleEl.style.display = 'none';
+        if (ctx && overlayCanvas) {
+          ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        }
+        if (reticleEl) reticleEl.style.display = 'none';
         highlightLegend(null);
         setStatus('Hand AR Ready (Show Hand)', true);
         prevPalmX = null;
         prevPalmY = null;
         prevPinchY = null;
         wasPinching = false;
+        fistStartTime = 0;
+        fistTriggeredInClosure = false;
       }
     }
 
@@ -252,8 +267,9 @@ export function createGestureController(callbacks) {
     if (running) return true;
     try {
       setStatus('Loading MediaPipe Hands...', false);
+      if (onErrorState) onErrorState(null);
 
-      if (! navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('Webcam API unavailable in this browser context');
       }
 
@@ -292,11 +308,23 @@ export function createGestureController(callbacks) {
     } catch (err) {
       console.warn('Hand AR fallback to mouse/touch:', err);
       stop();
-      setStatus('Camera Denied — Mouse Active', false);
+      const isPermission =
+        err?.name === 'NotAllowedError' ||
+        err?.name === 'PermissionDeniedError' ||
+        String(err?.message || '').toLowerCase().includes('permission');
+      const reason = isPermission
+        ? 'Camera permission was denied. Allow camera access in your browser address bar or continue with Mouse / Touch orbit.'
+        : 'Camera or MediaPipe hand tracker unavailable on this device. Full Mouse / Touch orbit, zoom, and slice controls remain active.';
+      setStatus('Camera Unavailable — Touch/Mouse Active', false);
       if (placeholderEl) {
         placeholderEl.style.display = 'block';
-        placeholderEl.innerHTML =
-          'Camera unavailable or permission denied.<br/><strong>Mouse Orbit, Click-to-Select &amp; Slice</strong> remain fully active.';
+        placeholderEl.innerHTML = `${reason}`;
+      }
+      if (onErrorState) {
+        onErrorState({
+          type: isPermission ? 'permission-denied' : 'unavailable',
+          message: reason
+        });
       }
       return false;
     }
@@ -322,7 +350,9 @@ export function createGestureController(callbacks) {
     if (placeholderEl) {
       placeholderEl.style.display = 'block';
     }
-    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    if (ctx && overlayCanvas) {
+      ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    }
     highlightLegend(null);
     setStatus('Mouse / Touch Active', false);
   }
