@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Heart AR — Interactive 3D Cardiac Anatomy Explorer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-deep: #060912;
+      --bg-panel: rgba(11, 16, 28, 0.82);
+      --bg-panel-strong: rgba(14, 21, 36, 0.92);
+      --border: rgba(125, 160, 220, 0.18);
+      --border-highlight: rgba(244, 63, 94, 0.55);
+      --text: #eef3ff;
+      --text-muted: #8ea0c0;
+      --accent-red: #f43f5e;
+      --accent-blue: #38bdf8;
+      --accent-amber: #f59e0b;
+      --accent-emerald: #10b981;
+      --accent-purple: #a855f7;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: radial-gradient(circle at 50% 42%, #131b31 0%, #090d19 58%, #04060c 100%);
+      color: var(--text);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    #canvas-container {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+    }
+
+    canvas#heart-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+    }
+
+    canvas#heart-canvas:active {
+      cursor: grabbing;
+    }
+
+    /* Top Telemetry Bar */
+    .topbar {
+      position: fixed;
+      top: 14px;
+      left: 16px;
+      right: 16px;
+      height: 54px;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 18px;
+      background: var(--bg-panel);
+      backdrop-filter: blur(18px);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-pulse {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--accent-red);
+      box-shadow: 0 0 14px var(--accent-red);
+      animation: pulseDot 0.85s infinite ease-in-out;
+    }
+
+    @keyframes pulseDot {
+      0%, 100% { transform: scale(1); opacity: 0.9; }
+      35% { transform: scale(1.38); opacity: 1; }
+    }
+
+    .brand-title {
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: 0.03em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .brand-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(244, 63, 94, 0.16);
+      color: #fda4af;
+      border: 1px solid rgba(244, 63, 94, 0.35);
+    }
+
+    .telemetry-strip {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+
+    .ecg-box {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 4px 10px;
+      border-radius: 10px;
+      background: rgba(6, 11, 22, 0.72);
+      border: 1px solid rgba(244, 63, 94, 0.24);
+    }
+
+    #ecg-canvas {
+      width: 140px;
+      height: 30px;
+      display: block;
+    }
+
+    .bpm-readout {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      font-weight: 600;
+      color: #fda4af;
+      min-width: 72px;
+    }
+
+    .phase-pill {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 8px;
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      color: #bae6fd;
+      min-width: 138px;
+      text-align: center;
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn {
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 7px 12px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.16s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn:hover {
+      background: rgba(255, 255, 255, 0.11);
+      border-color: rgba(148, 184, 245, 0.4);
+    }
+
+    .btn.active {
+      background: rgba(244, 63, 94, 0.2);
+      border-color: var(--accent-red);
+      color: #ffe4e6;
+    }
+
+    .btn-ar {
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.22), rgba(56, 189, 248, 0.22));
+      border-color: rgba(16, 185, 129, 0.45);
+      color: #d1fae5;
+    }
+
+    .btn-ar.active {
+      background: rgba(16, 185, 129, 0.28);
+      border-color: #10b981;
+      color: #ecfdf5;
+    }
+
+    /* Left Panel: 26 Anatomical Structures Catalog */
+    .left-panel {
+      position: fixed;
+      top: 80px;
+      left: 16px;
+      bottom: 92px;
+      width: 295px;
+      z-index: 20;
+      background: var(--bg-panel);
+      backdrop-filter: blur(18px);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.42);
+    }
+
+    .panel-header {
+      padding: 12px 14px 10px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .panel-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .panel-title {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+    }
+
+    .part-count {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: #93c5fd;
+      background: rgba(59, 130, 246, 0.14);
+      padding: 2px 7px;
+      border-radius: 6px;
+    }
+
+    .search-input {
+      width: 100%;
+      padding: 7px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: rgba(5, 9, 18, 0.7);
+      color: var(--text);
+      font-size: 12px;
+      outline: none;
+    }
+
+    .search-input:focus {
+      border-color: var(--accent-blue);
+    }
+
+    .category-tabs {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .cat-tab {
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 4px 7px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+
+    .cat-tab.active {
+      background: rgba(56, 189, 248, 0.16);
+      border-color: rgba(56, 189, 248, 0.45);
+      color: #e0f2fe;
+    }
+
+    .parts-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .parts-list::-webkit-scrollbar {
+      width: 5px;
+    }
+
+    .parts-list::-webkit-scrollbar-thumb {
+      background: rgba(148, 163, 184, 0.25);
+      border-radius: 999px;
+    }
+
+    .part-item {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 7px 9px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      background: rgba(255, 255, 255, 0.02);
+      cursor: pointer;
+      transition: all 0.14s ease;
+      text-align: left;
+      color: var(--text);
+    }
+
+    .part-item:hover {
+      background: rgba(255, 255, 255, 0.07);
+      border-color: rgba(148, 163, 184, 0.24);
+    }
+
+    .part-item.selected {
+      background: rgba(244, 63, 94, 0.18);
+      border-color: rgba(244, 63, 94, 0.65);
+      box-shadow: inset 0 0 12px rgba(244, 63, 94, 0.15);
+    }
+
+    .part-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      box-shadow: 0 0 6px currentColor;
+    }
+
+    .part-item-text {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .part-item-name {
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .part-item-cat {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .part-item-index {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: var(--text-muted);
+      opacity: 0.7;
+    }
+
+    /* Right Panel: Selected Part Inspector + Hand AR Feed */
+    .right-panel {
+      position: fixed;
+      top: 80px;
+      right: 16px;
+      width: 325px;
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: calc(100vh - 172px);
+    }
+
+    .inspector-card {
+      background: var(--bg-panel);
+      backdrop-filter: blur(18px);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 15px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.42);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .inspector-eyebrow {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .inspector-category {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: rgba(244, 63, 94, 0.16);
+      color: #fda4af;
+      border: 1px solid rgba(244, 63, 94, 0.35);
+    }
+
+    .inspector-oxy {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px;
+      padding: 3px 8px;
+      border-radius: 6px;
+    }
+
+    .inspector-title {
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.25;
+      color: #ffffff;
+    }
+
+    .inspector-latin {
+      font-size: 11.5px;
+      font-style: italic;
+      color: var(--text-muted);
+      margin-top: -4px;
+    }
+
+    .inspector-summary {
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: #dbe6ff;
+    }
+
+    .inspector-meta-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding-top: 6px;
+      border-top: 1px solid var(--border);
+    }
+
+    .meta-box {
+      background: rgba(6, 10, 20, 0.6);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 8px;
+      padding: 7px 9px;
+    }
+
+    .meta-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: 2px;
+    }
+
+    .meta-value {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    /* Webcam & Gesture Card */
+    .gesture-card {
+      background: var(--bg-panel);
+      backdrop-filter: blur(18px);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.42);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .gesture-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .gesture-status-pill {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.15);
+      color: #cbd5e1;
+      border: 1px solid rgba(148, 163, 184, 0.3);
+    }
+
+    .gesture-status-pill.live {
+      background: rgba(16, 185, 129, 0.18);
+      color: #6ee7b7;
+      border-color: rgba(16, 185, 129, 0.45);
+    }
+
+    .cam-preview-wrap {
+      position: relative;
+      width: 100%;
+      height: 132px;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #050811;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #webcam-video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+      display: none;
+    }
+
+    #hand-overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .cam-placeholder {
+      text-align: center;
+      padding: 12px;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      line-height: 1.45;
+    }
+
+    .gesture-legend {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 5px;
+      font-size: 11px;
+    }
+
+    .legend-item {
+      padding: 5px 7px;
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      color: #cbd5e1;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .legend-item.active-gesture {
+      background: rgba(16, 185, 129, 0.2);
+      border-color: #10b981;
+      color: #ffffff;
+    }
+
+    .legend-key {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: #38bdf8;
+      font-weight: 600;
+    }
+
+    /* Bottom Dock: Slice, Flow, BPM & Camera Controls */
+    .bottom-dock {
+      position: fixed;
+      left: 16px;
+      right: 16px;
+      bottom: 14px;
+      height: 64px;
+      z-index: 20;
+      background: var(--bg-panel);
+      backdrop-filter: blur(18px);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    }
+
+    .control-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .control-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 145px;
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.22);
+      outline: none;
+    }
+
+    .slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 15px;
+      height: 15px;
+      border-radius: 50%;
+      background: var(--accent-red);
+      border: 2px solid #ffffff;
+      cursor: pointer;
+      box-shadow: 0 0 10px rgba(244, 63, 94, 0.7);
+    }
+
+    .value-chip {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text);
+      min-width: 44px;
+    }
+
+    .axis-group {
+      display: flex;
+      gap: 4px;
+    }
+
+    .axis-btn {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+
+    .axis-btn.active {
+      background: rgba(56, 189, 248, 0.2);
+      border-color: var(--accent-blue);
+      color: #ffffff;
+    }
+
+    .flow-legend {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 11.5px;
+      color: #cbd5e1;
+    }
+
+    .flow-dot {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      margin-right: 5px;
+    }
+
+    /* Floating 3D Hover Tooltip & Hand Reticle */
+    #hover-tooltip {
+      position: fixed;
+      z-index: 30;
+      pointer-events: none;
+      padding: 6px 10px;
+      border-radius: 8px;
+      background: rgba(8, 13, 24, 0.92);
+      border: 1px solid rgba(244, 63, 94, 0.55);
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 600;
+      transform: translate(-50%, -135%);
+      display: none;
+      white-space: nowrap;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+    }
+
+    #hand-reticle {
+      position: fixed;
+      z-index: 35;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      border: 2px solid #38bdf8;
+      box-shadow: 0 0 16px rgba(56, 189, 248, 0.75), inset 0 0 8px rgba(56, 189, 248, 0.4);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      display: none;
+      transition: transform 0.06s ease, border-color 0.12s ease;
+    }
+
+    #hand-reticle.pinching {
+      border-color: #f43f5e;
+      box-shadow: 0 0 22px rgba(244, 63, 94, 0.95), inset 0 0 10px rgba(244, 63, 94, 0.6);
+      transform: translate(-50%, -50%) scale(0.76);
+    }
+
+    /* 3D Callout Pin for Selected Part */
+    #selected-pin {
+      position: fixed;
+      z-index: 15;
+      pointer-events: none;
+      display: none;
+      transform: translate(-50%, -100%);
+    }
+
+    .pin-bubble {
+      background: rgba(14, 21, 38, 0.92);
+      border: 1px solid var(--accent-red);
+      color: #fff;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+    }
+
+    @media (max-width: 1024px) {
+      .left-panel { width: 240px; }
+      .right-panel { width: 270px; }
+      .telemetry-strip { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="canvas-container">
+    <canvas id="heart-canvas"></canvas>
+  </div>
+
+  <!-- Top Telemetry Bar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-pulse" id="pulse-indicator"></div>
+      <div class="brand-title">
+        <span>HEART AR</span>
+        <span class="brand-badge">26 STRUCTURES</span>
+      </div>
+    </div>
+
+    <div class="telemetry-strip">
+      <div class="ecg-box">
+        <canvas id="ecg-canvas" width="140" height="30"></canvas>
+        <div class="bpm-readout" id="bpm-readout">72 BPM</div>
+      </div>
+      <div class="phase-pill" id="cardiac-phase">VENTRICULAR SYSTOLE</div>
+    </div>
+
+    <div class="topbar-actions">
+      <button class="btn active" id="btn-toggle-flow" title="Toggle Hemodynamic Blood Flow">Blood Flow: ON</button>
+      <button class="btn active" id="btn-toggle-beat" title="Toggle Cardiac Contraction">Beat: ON</button>
+      <button class="btn" id="btn-explode" title="Slightly separate structures for inspection">Explode View</button>
+      <button class="btn btn-ar" id="btn-enable-ar">Enable Hand AR</button>
+      <button class="btn" id="btn-reset-view">Reset View</button>
+    </div>
+  </header>
+
+  <!-- Left 26-Part Catalog -->
+  <aside class="left-panel">
+    <div class="panel-header">
+      <div class="panel-title-row">
+        <span class="panel-title">Anatomical Catalog</span>
+        <span class="part-count" id="part-count-badge">26 / 26</span>
+      </div>
+      <input
+        type="text"
+        id="part-search"
+        class="search-input"
+        placeholder="Filter 26 chambers, valves, vessels..."
+        autocomplete="off"
+      />
+      <div class="category-tabs" id="category-tabs">
+        <button class="cat-tab active" data-cat="All">All (26)</button>
+        <button class="cat-tab" data-cat="Chambers & Septa">Chambers</button>
+        <button class="cat-tab" data-cat="Valves & Apparatus">Valves</button>
+        <button class="cat-tab" data-cat="Great Vessels">Vessels</button>
+        <button class="cat-tab" data-cat="Coronary System">Coronary</button>
+      </div>
+    </div>
+    <div class="parts-list" id="parts-list"></div>
+  </aside>
+
+  <!-- Right Inspector & Hand AR Dock -->
+  <aside class="right-panel">
+    <section class="inspector-card" id="inspector-card">
+      <div class="inspector-eyebrow">
+        <span class="inspector-category" id="info-category">CARDIAC OVERVIEW</span>
+        <span class="inspector-oxy" id="info-oxygen">DUAL CIRCULATION</span>
+      </div>
+      <h2 class="inspector-title" id="info-title">Human Heart (26-Part Model)</h2>
+      <div class="inspector-latin" id="info-latin">Cor humanum — Pulmonary &amp; Systemic Pump</div>
+      <p class="inspector-summary" id="info-description">
+        Click any structure on the 3D heart or pick from the 26-part catalog on the left. Drag the Cross-Section Slice slider below to open the chambers and inspect the interventricular septum, valves, chordae tendineae, and papillary muscles.
+      </p>
+      <div class="inspector-meta-grid">
+        <div class="meta-box">
+          <div class="meta-label">Blood Pathway</div>
+          <div class="meta-value" id="info-pathway">RA → RV → Lungs → LA → LV → Aorta</div>
+        </div>
+        <div class="meta-box">
+          <div class="meta-label">Clinical Role</div>
+          <div class="meta-value" id="info-role">~5 L/min Cardiac Output</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="gesture-card">
+      <div class="gesture-header">
+        <span class="panel-title">Webcam Hand AR</span>
+        <span class="gesture-status-pill" id="gesture-status">Mouse / Touch Active</span>
+      </div>
+      <div class="cam-preview-wrap">
+        <video id="webcam-video" playsinline muted></video>
+        <canvas id="hand-overlay" width="290" height="132"></canvas>
+        <div class="cam-placeholder" id="cam-placeholder">
+          Click <strong>Enable Hand AR</strong> to control with MediaPipe Hands, or use mouse drag &amp; scroll anytime.
+        </div>
+      </div>
+      <div class="gesture-legend">
+        <div class="legend-item" id="legend-orbit"><span class="legend-key">OPEN HAND</span> Orbit</div>
+        <div class="legend-item" id="legend-zoom"><span class="legend-key">PINCH ↕</span> Zoom</div>
+        <div class="legend-item" id="legend-select"><span class="legend-key">PINCH PART</span> Select</div>
+        <div class="legend-item" id="legend-reset"><span class="legend-key">FIST</span> Reset</div>
+      </div>
+    </section>
+  </aside>
+
+  <!-- Bottom Control Dock -->
+  <footer class="bottom-dock">
+    <div class="control-group">
+      <span class="control-label">Cross-Section Slice</span>
+      <input type="range" id="slice-slider" class="slider" min="0" max="100" value="0" />
+      <span class="value-chip" id="slice-value">Off</span>
+      <div class="axis-group" id="slice-axis-group">
+        <button class="axis-btn active" data-axis="z" title="Anterior-Posterior Coronal Cut">Front</button>
+        <button class="axis-btn" data-axis="x" title="Left-Right Sagittal Cut">Side</button>
+        <button class="axis-btn" data-axis="y" title="Superior-Inferior Axial Cut">Top</button>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <span class="control-label">Heart Rate</span>
+      <input type="range" id="bpm-slider" class="slider" min="40" max="160" value="72" />
+      <span class="value-chip" id="bpm-value">72 BPM</span>
+    </div>
+
+    <div class="flow-legend">
+      <span><i class="flow-dot" style="background:#38bdf8; box-shadow:0 0 8px #38bdf8"></i>Deoxygenated (Venous → Lungs)</span>
+      <span><i class="flow-dot" style="background:#f43f5e; box-shadow:0 0 8px #f43f5e"></i>Oxygenated (Lungs → Systemic)</span>
+    </div>
+  </footer>
+
+  <!-- Floating Tooltip & Hand Reticle -->
+  <div id="hover-tooltip"></div>
+  <div id="selected-pin"><div class="pin-bubble" id="selected-pin-label"></div></div>
+  <div id="hand-reticle"></div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
